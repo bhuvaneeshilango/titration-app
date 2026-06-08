@@ -14,11 +14,19 @@ uploaded_file = st.file_uploader("Upload Partial Titration Data (e.g., first 3-5
 if uploaded_file is not None:
     try:
         df = pd.read_csv(uploaded_file, sep='\s+')
+        
+        # --- THE FIX: DATA SANITIZATION ---
+        # 1. Drop any "ghost" columns at the end that are completely empty (NaN)
+        df = df.dropna(axis=1, how='all')
+        # 2. Drop any empty rows at the bottom
+        df = df.dropna(axis=0, how='any')
+        # ----------------------------------
+        
         wavelengths = df.iloc[:, 0].values
         intensities_orig = df.iloc[:, 1:].values
         num_orig = intensities_orig.shape[1]
         
-        st.success(f"Loaded baseline + {num_orig - 1} physical additions.")
+        st.success(f"Cleaned and loaded baseline + {num_orig - 1} physical additions.")
 
         # ==========================================
         # 2. SIDEBAR: EXPERIMENTAL SETUP
@@ -30,11 +38,8 @@ if uploaded_file is not None:
         st.sidebar.header("2. Slope & Rate Control")
         st.sidebar.write("*Control how aggressively the quenching/enhancement proceeds past your uploaded data.*")
         
-        # 1.0 means it continues the exact trend of your uploaded data. 
-        # 1.5 means it quenches 50% faster. 0.5 means it quenches 50% slower.
         slope_multiplier = st.sidebar.slider("Rate Multiplier (Slope Control)", 0.1, 3.0, 1.0, 0.05)
         
-        # Determine if it stays linear or curves into saturation
         trend_type = st.sidebar.radio("Trend Geometry", ["Strictly Linear", "Asymptotic (Saturating)"])
         if trend_type == "Asymptotic (Saturating)":
             sharpness = st.sidebar.slider("Saturation Curvature", 0.1, 1.0, 0.3)
@@ -43,42 +48,29 @@ if uploaded_file is not None:
         # 3. MATH: THE STRUCTURAL VECTOR
         # ==========================================
         S_base = intensities_orig[:, 0]
-        S_last = intensities_orig[:, -1]
+        S_last = intensities_orig[:, -1] # This will now grab the TRUE last curve, not the ghost column!
         
-        # This vector defines the pure chemical shift. At the isoemissive point, Delta_S = 0.
         Delta_S = S_last - S_base 
         
         new_intensities = np.zeros((len(wavelengths), total_curves))
         
-        # Fill in the original data exactly as uploaded
         for i in range(num_orig):
             new_intensities[:, i] = intensities_orig[:, i]
 
-        # Calculate the mathematical progress of the uploaded data
-        # Let's define the base as progress=0, and the last uploaded curve as progress=1
-        
         for i in range(num_orig, total_curves):
-            # How many steps past the uploaded data are we?
             step_projection = (i - (num_orig - 1)) * slope_multiplier
             
             if trend_type == "Strictly Linear":
-                # Continues linearly based on your slope multiplier
                 progress_factor = 1.0 + step_projection
             else:
-                # Curves smoothly based on the sharpness
                 progress_factor = 1.0 + (3.0 * slope_multiplier) * (1 - np.exp(-sharpness * step_projection))
             
-            # Apply the progress to the structural vector
-            # Because Delta_S is 0 at the isoemissive point, that specific wavelength mathematically cannot move.
             generated_spectrum = S_base + (progress_factor * Delta_S)
-            
-            # Ensure intensity doesn't mathematically drop below zero
             new_intensities[:, i] = np.clip(generated_spectrum, a_min=0, a_max=None)
 
         # ==========================================
         # 4. PLOTTING
         # ==========================================
-        # Extract monitor wavelength trend for the linearity plot
         wl_idx = (np.abs(wavelengths - monitor_wl)).argmin()
         trend_y = new_intensities[wl_idx, :]
         x_axis_steps = np.arange(total_curves)
@@ -87,14 +79,11 @@ if uploaded_file is not None:
         fig1, ax1 = plt.subplots(figsize=(8, 5))
         for i in range(total_curves):
             if i < num_orig:
-                # Highlight the uploaded data you provided
                 ax1.plot(wavelengths, new_intensities[:, i], color='black', linewidth=1.5, alpha=0.8)
             else:
-                # Plot the extrapolated data with a smooth color gradient
                 alpha_val = np.clip(0.3 + (i/total_curves)*0.7, 0, 1)
                 ax1.plot(wavelengths, new_intensities[:, i], color='blue', linestyle='--', alpha=alpha_val)
 
-        # Add a custom legend
         ax1.plot([], [], color='black', linewidth=1.5, label='Uploaded Physical Data')
         ax1.plot([], [], color='blue', linestyle='--', label='Extrapolated Trend')
         ax1.axvline(x=monitor_wl, color='red', linestyle=':', alpha=0.5, label=f'Monitor ({monitor_wl} nm)')
